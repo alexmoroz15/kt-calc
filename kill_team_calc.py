@@ -203,6 +203,96 @@ class KillTeamCalculator:
         return damage_chances
 
 
+class AttackerDiceParamsBuilder:
+    """Builder to translate Kill-team-like terminology into something the calculator can use."""
+
+    bs: int | None = None
+    num_attacks: int | None = None
+    lethal_x: int | None = None
+    ceaseless: bool = False
+    relentless: bool = False
+    balanced: bool = False
+    reroll_strategy: RerollStrategy | None = None
+
+    def with_bs(self, bs: int):
+        self.bs = bs
+        return self
+
+    def with_num_attacks(self, num_attacks: int):
+        self.num_attacks = num_attacks
+        return self
+
+    def with_lethal_x(self, x: int):
+        self.lethal_x = x
+        return self
+
+    def with_ceaseless(self, ceaseless: bool = True):
+        self.ceaseless = ceaseless
+        return self
+
+    def with_relentless(self, relentless: bool = True):
+        self.relentless = relentless
+        return self
+
+    def with_balanced(self, balanced: bool = True):
+        self.balanced = balanced
+        raise NotImplementedError(
+            "I have not generalized the probabilities to allow for only 1 re-roll."
+        )
+
+    def with_reroll_stategy(self, reroll_strategy: RerollStrategy):
+        self.reroll_strategy = reroll_strategy
+        return self
+
+    def _get_miss_states(self) -> int:
+        assert self.bs is not None
+        return self.bs - 1
+
+    def _get_reroll_chances(self) -> tuple[float, float, float]:
+        """Returns probability to re-roll a miss, hit, and crit, respectively"""
+        if self.relentless:
+            if self.reroll_strategy == RerollStrategy.NO_REROLL:
+                return (0, 0, 0)
+            if self.reroll_strategy == RerollStrategy.REROLL_MISSES:
+                return (1, 0, 0)
+            if self.reroll_strategy == RerollStrategy.FISH_FOR_CRITS:
+                return (1, 1, 0)
+            if self.reroll_strategy == RerollStrategy.TRY_TO_MISS:
+                return (0, 1, 1)
+        if self.ceaseless:
+            return (1 / self._get_miss_states(), 0, 0)
+        return (0, 0, 0)
+
+    def build(self) -> DiceParams:
+        assert self.bs is not None
+        assert self.num_attacks is not None
+        if self.relentless or self.balanced:
+            assert self.reroll_strategy is not None
+
+        miss_states = self._get_miss_states()
+        hit_states = (
+            7 - self.bs - 1 if self.lethal_x is None else self.lethal_x - self.bs
+        )
+        crit_states = 1 if self.lethal_x is None else self.lethal_x
+        assert miss_states + hit_states + crit_states == 6
+
+        (
+            reroll_given_miss_chance,
+            reroll_given_hit_chance,
+            reroll_given_crit_chance,
+        ) = self._get_reroll_chances()
+
+        return DiceParams(
+            num_dice=self.num_attacks,
+            miss_chance=miss_states / 6,
+            hit_chance=hit_states / 6,
+            crit_chance=crit_states / 6,
+            reroll_given_miss_chance=reroll_given_miss_chance,
+            reroll_given_hit_chance=reroll_given_hit_chance,
+            reroll_given_crit_chance=reroll_given_crit_chance,
+        )
+
+
 class KillTeamCalculatorBuilder:
     """Builder to translate Kill-Team-like terminology into something the calculator can use."""
 
@@ -369,7 +459,9 @@ def main():
             (calculator_deathspitter, "deathspitter"),
             (calculator_bolter, "bolter"),
         ]:
-            assert isinstance(calculator, KillTeamCalculator) and isinstance(weapon_name, str)
+            assert isinstance(calculator, KillTeamCalculator) and isinstance(
+                weapon_name, str
+            )
             print(f"evaluating: {weapon_name} against SV {save_characteristic}+")
             damage_chances = calculator.calculate_damage_chances()
 
