@@ -87,17 +87,20 @@ class DamageParams:
 
     normal_damage: int
     crit_damage: int
+    mortal_wounds: int
 
 
 @dataclass
 class KillTeamCalculatorParams:
+    """Wrapper for Calculator params"""
+
     attack_dice_params: DiceParams
     defense_dice_params: DiceParams
     damage_params: DamageParams
 
 
 def calculate_dice_chances(dice_params: DiceParams) -> dict[Outcome, float]:
-    # print(f"dice_params: {dice_params}")
+    """Calculates and maps each dice result to its probability."""
     hit_chances: dict[Outcome, float] = {}
     n = dice_params.num_dice
     for num_hits in range(n + 1):
@@ -107,18 +110,20 @@ def calculate_dice_chances(dice_params: DiceParams) -> dict[Outcome, float]:
             outcome = Outcome(num_hits, num_crits)
             hit_chances[outcome] = math.prod(
                 [
-                    (dice_params.num_crit_states / 6) ** num_crits,
-                    (dice_params.num_hit_states / 6) ** num_hits,
-                    (dice_params.num_miss_states / 6) ** num_misses,
+                    dice_params.crit_chance**num_crits,
+                    dice_params.hit_chance**num_hits,
+                    dice_params.miss_chance**num_misses,
                     math.comb(n, num_hits),
                     math.comb(n - num_hits, num_crits),
                 ]
             )
-    assert abs(sum(hit_chances.values()) - 1) < 0.0001
+    assert math.isclose(sum(hit_chances.values()), 1.0)
     return hit_chances
 
 
 class KillTeamCalculator:
+    """Calculates how many hits and damage an attack will inflict on a given defender."""
+
     def __init__(self, params):
         self.params = params
 
@@ -127,6 +132,7 @@ class KillTeamCalculator:
     def apply_defense_dice_to_hit_outcome(
         self, hit_outcome: Outcome, defense_outcome: Outcome
     ) -> Outcome:
+        """Applies defense dice to the hit outcome such that the defender takes the least damage."""
         # I don't have a CS degree, so just try every combination to see which outcome
         # results in the least damage.
 
@@ -156,21 +162,27 @@ class KillTeamCalculator:
         assert best_outcome is not None
         return best_outcome
 
-    def calculate_hit_chances(self) -> dict[Outcome, float]:
+    def calculate_attacker_outcome_probabilities(self) -> dict[Outcome, float]:
+        """Calculates the probability for each result for the attacker."""
         return calculate_dice_chances(self.params.attack_dice_params)
 
-    def calculate_defense_chances(self) -> dict[Outcome, float]:
+    def calculate_defender_outcome_probabilities(self) -> dict[Outcome, float]:
+        """Calculates the probability for each result for the defender."""
         return calculate_dice_chances(self.params.defense_dice_params)
 
-    def calculate_net_hit_chances(self) -> dict[Outcome, float]:
-        hit_chances = self.calculate_hit_chances()
-        defence_chances = self.calculate_defense_chances()
+    def calculate_net_hit_chances(self) -> dict[NetOutcome, float]:
+        """Calculates the probability for each net outcome."""
+        hit_chances = self.calculate_attacker_outcome_probabilities()
+        defence_chances = self.calculate_defender_outcome_probabilities()
 
-        net_hit_chances: dict[Outcome, float] = {}
+        net_hit_chances: dict[NetOutcome, float] = {}
         for hit_outcome, hit_chance in hit_chances.items():
             for defense_outcome, defense_chance in defence_chances.items():
-                net_hit_outcome = self.apply_defense_dice_to_hit_outcome(
-                    hit_outcome, defense_outcome
+                net_hit_outcome = NetOutcome(
+                    net_outcome=self.apply_defense_dice_to_hit_outcome(
+                        hit_outcome, defense_outcome
+                    ),
+                    original_outcome=hit_outcome,
                 )
                 net_hit_chances[net_hit_outcome] = (
                     net_hit_chances.get(net_hit_outcome, 0)
@@ -179,18 +191,21 @@ class KillTeamCalculator:
         return net_hit_chances
 
     def calculate_damage_chances(self) -> dict[int, float]:
+        """Calculates the probability to deal an exact amount to the defender."""
         hit_chances = self.calculate_net_hit_chances()
         damage_chances: dict[int, float] = {}
         for outcome, chance in hit_chances.items():
             damage = (
-                outcome.num_hits * self.params.damage_params.normal_damage
-                + outcome.num_crits * self.params.damage_params.crit_damage
+                outcome.net_outcome.num_hits * self.params.damage_params.normal_damage
+                + outcome.net_outcome.num_crits * self.params.damage_params.crit_damage
             )
             damage_chances[damage] = damage_chances.get(damage, 0) + chance
         return damage_chances
 
 
 class KillTeamCalculatorBuilder:
+    """Builder to translate Kill-Team-like terminology into something the calculator can use."""
+
     bs: int | None = None
     num_attacks: int | None = None
     normal_damage: int | None = None
@@ -200,88 +215,112 @@ class KillTeamCalculatorBuilder:
     ap: int | None = None
 
     def with_ballistic_skill(self, bs: int):
+        """The attacker's weapon's ballistic skill."""
         assert 1 < bs < 7
         self.bs = bs
         return self
 
     def with_num_attacks(self, num_attacks: int):
+        """The number of attacks on the attacker's weapon."""
         assert num_attacks >= 1
         self.num_attacks = num_attacks
         return self
 
     def with_normal_damage(self, normal_damage: int):
+        """The normal damage for the attacker's weapon."""
         assert normal_damage >= 0
         self.normal_damage = normal_damage
         return self
 
     def with_crit_damage(self, crit_damage: int):
+        """The critical damage for the attacker's weapon."""
         assert crit_damage >= 0
         self.crit_damage = crit_damage
         return self
 
     def with_save_characteristic(self, sv: int):
+        """The defender's save characteristic."""
         assert 1 < sv < 7
         self.sv = sv
         return self
 
     def with_lethal_x(self, x: int):
+        """Makes the attacker's critical hits more likely."""
         assert 1 < x < 7
         self.lethal = x
         return self
 
     def with_mw_x(self, x: int):
+        """Applies damage even if the defender blocks a critical hit."""
         raise NotImplementedError("MW x is not supported yet")
 
     def with_free_normal_saves(self, num_free_saves: int):
+        """Gives the defender free saves, like if they had cover."""
         raise NotImplementedError("Having free saves is not supported yet")
 
     def with_ap_x(self, x: int):
+        """Reduces the number of defense dice the defender rolls."""
         assert 0 <= x <= 2
         self.ap = x
         return self
 
     def with_p_x(self, x: int):
+        """If the attacker scores a critical hit, gives the attacker AP x."""
         raise NotImplementedError("P x is not supported yet")
 
     def with_ceaseless(self, ceaseless: bool):
+        """Attacker re-rolls hit rolls of 1."""
         raise NotImplementedError("Ceaseless is not supported yet")
 
     def with_relentless(self, relentless: bool):
+        """Attacker can re-roll everything."""
         raise NotImplementedError("Relentless is not supported yet")
 
-    def with_balances(self, balanced: bool):
+    def with_balanced(self, balanced: bool):
+        """Attacker can re-roll one die."""
         raise NotImplementedError("Balanced is not supported yet")
 
     def build(self) -> KillTeamCalculator:
+        """Creates a configured calculator."""
         assert self.bs is not None
         assert self.num_attacks is not None
         assert self.normal_damage is not None
         assert self.crit_damage is not None
         assert self.sv is not None
+
         params = KillTeamCalculatorParams(
             attack_dice_params=DiceParams(
                 num_dice=self.num_attacks,
-                num_hit_states=(
+                miss_chance=(self.bs - 1) / 6,
+                hit_chance=(
                     6 - self.bs if self.lethal is None else self.lethal - self.bs
-                ),
-                num_crit_states=1 if self.lethal is None else 7 - self.lethal,
-                num_miss_states=self.bs - 1,
+                )
+                / 6,
+                crit_chance=(1 if self.lethal is None else 7 - self.lethal) / 6,
+                reroll_given_miss_chance=0,
+                reroll_given_hit_chance=0,
+                reroll_given_crit_chance=0,
             ),
             defense_dice_params=DiceParams(
                 num_dice=3 if self.ap is None else 3 - self.ap,
-                num_hit_states=6 - self.sv,
-                num_crit_states=1,
-                num_miss_states=self.sv - 1,
+                miss_chance=(self.sv - 1) / 6,
+                hit_chance=(6 - self.sv) / 6,
+                crit_chance=1 / 6,
+                reroll_given_miss_chance=0,
+                reroll_given_hit_chance=0,
+                reroll_given_crit_chance=0,
             ),
             damage_params=DamageParams(
                 normal_damage=self.normal_damage,
                 crit_damage=self.crit_damage,
+                mortal_wounds=0,
             ),
         )
         return KillTeamCalculator(params)
 
 
 def main():
+    """My own main function for testing out the functionality."""
     # for save_characteristic in range(2, 7):
     for save_characteristic in [5]:
         calculator_fleshborer = (
@@ -330,8 +369,9 @@ def main():
             (calculator_deathspitter, "deathspitter"),
             (calculator_bolter, "bolter"),
         ]:
+            assert isinstance(calculator, KillTeamCalculator) and isinstance(weapon_name, str)
             print(f"evaluating: {weapon_name} against SV {save_characteristic}+")
-            damage_chances: dict[int, float] = calculator.calculate_damage_chances()
+            damage_chances = calculator.calculate_damage_chances()
 
             def sum_above_threshold(
                 chance_map: dict[int, float], threshold: int
